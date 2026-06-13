@@ -113,95 +113,108 @@ module outer_basket() {
     }
 }
 
-// flat‑topped hex, radius = hex_r (center to vertex)
-module lid_hexagon() {
-    linear_extrude(height = 55)
-        rotate(30)                    // flat‑topped
-            circle(r = hex_r, $fn = 6);
-}
-
-module lid_hex_pattern() {
-
-    hex_width  = sqrt(3) * hex_r;         // flat‑to‑flat
-    hex_height = 2 * hex_r;               // point‑to‑point
-
-    dx = hex_width + wall;            // horizontal spacing
-    dy = 1.5 * hex_r + wall;              // vertical spacing
-
-    max_x = filter_r + dx;
-    max_y = filter_r + dy;
-
-    row = 0;
-    for (y = [-max_y : dy : max_y]) {
-
-        // stagger every other row horizontally
-        x_offset = (row % 2 == 1) ? dx/2 : 0;
-
-        for (x = [-max_x : dx : max_x]) {
-
-            cx = x + x_offset;
-            cy = y;
-
-            if (cx*cx + cy*cy <= filter_r*filter_r)
-                translate([cx, cy, 0])
-                    lid_hexagon();
-        }
-
-        row = row + 1;
-    }
-}
-
-
-//lid_hex_pattern();
-
 // Inner lid
 module inner_lid() {
-    outer_r = (od_top+(wall*2))/2;
-    filter_access_r = filter_r-5;
+    lid_r = od_top / 2;                          // 100mm - rests on basket lip
+    insert_r = od_top / 2 - wall;                // 98mm - fits inside basket
+    filter_cyl_r = (filter_d - filter_h) / 2;    // 82.5mm - straight cylinder portion
+    torus_minor_r = filter_h / 2;                // 5mm - rounded edge radius
+
+    // Straight cylinder section from lip before dome curves
+    straight_h = filter_h / 2;                   // 5mm straight wall above lip
+
+    // Dome sphere: cap from lid_r at z=wall+straight_h up to z=wall+straight_h+lid_h
+    dome_base_z = wall + straight_h;
+    R_sphere = (lid_r * lid_r + lid_h * lid_h) / (2 * lid_h);
+    sphere_z = dome_base_z + lid_h - R_sphere;
+
+    // Hex grid spacing (flat-topped hexes, rotate 30)
+    hex_ftf = sqrt(3) * hex_r;                   // flat-to-flat width
+    dx = hex_ftf + wall;                         // horizontal center-to-center
+    dy = 1.5 * hex_r + wall;                    // vertical center-to-center
+
+    // Max center distance for vent hex to be entirely within filter_cyl_r
+    vent_max_dist = filter_cyl_r - hex_r;
+
+    // Grid search range
+    N = ceil(filter_cyl_r / min(dx, dy)) + 1;
+
     difference() {
-        // Outer portion, bottom up
         union() {
-            translate([0,0,0])    cylinder(h=wall, d=od_top, $fn=96);
-            translate([0,0,wall]) cylinder(h=wall, r=outer_r, $fn=96);
-            translate([0,0,wall*2]) intersection() {
-                scale([1, 1, lid_h/100]) sphere(r = outer_r, $fn=96);
-                translate([0,0,200]) cube([400,400,400], center=true);
+            // 1. Insert ring - goes wall deep into basket
+            cylinder(h = wall, r = insert_r, $fn = 96);
+
+            // 2. Straight cylinder from lip up straight_h before dome curves
+            translate([0, 0, wall])
+                cylinder(h = straight_h, r = lid_r, $fn = 96);
+
+            // 3. Dome - sphere cap from dome_base_z curving up to dome_base_z+lid_h
+            intersection() {
+                translate([0, 0, sphere_z])
+                    sphere(r = R_sphere, $fn = 96);
+                translate([0, 0, dome_base_z])
+                    cylinder(h = lid_h + 1, r = lid_r + 1, $fn = 96);
+            }
+
+            // 4. Grip - honeycomb walls rising grip_h above dome
+            difference() {
+                // Solid boundary: hull of 3-ring hex positions
+                linear_extrude(height = dome_base_z + lid_h + grip_h)
+                    hull()
+                        for (q = [-2:2])
+                            for (r = [-2:2])
+                                if (max(abs(q), abs(r), abs(-q - r)) <= 2)
+                                    translate([dx * (q + r * 0.5), dy * r])
+                                        rotate(30)
+                                            circle(r = hex_r + wall / 2, $fn = 6);
+
+                // Remove hex cell interiors (creates honeycomb walls)
+                for (q = [-2:2])
+                    for (r = [-2:2])
+                        if (max(abs(q), abs(r), abs(-q - r)) <= 2)
+                            translate([dx * (q + r * 0.5), dy * r, 0])
+                                linear_extrude(height = dome_base_z + lid_h + grip_h)
+                                    rotate(30)
+                                        circle(r = hex_r, $fn = 6);
+
+                // Remove everything below dome surface
+                translate([0, 0, sphere_z])
+                    sphere(r = R_sphere, $fn = 96);
             }
         }
-        // Hole for filter access
-        translate([0,0,0]) cylinder(h=wall, r=filter_access_r);
-        // Filter
-        translate([0,0,wall]) cylinder(h=filter_h, r=filter_r);
-        // Space under dome
-        translate([0,0,wall]) intersection() {
-            scale([1,1, lid_h/100]) sphere(r = outer_r, $fn=96);
-            translate([0,0,200+filter_h]) cube([400,400,400], center=true);
+
+        // 5. Filter pocket + gas access from below
+        //    Cylinder: straight walls from bottom through to filter_h into dome
+        cylinder(h = wall + filter_h, r = filter_cyl_r, $fn = 96);
+        //    Torus: rounded bulge matching filter barrel shape
+        translate([0, 0, wall + torus_minor_r])
+            rotate_extrude($fn = 96)
+                translate([filter_cyl_r, 0])
+                    circle(r = torus_minor_r, $fn = 48);
+
+        // 6. Hollow above filter - empty within filter_cyl_r, wall thickness at dome top
+        intersection() {
+            translate([0, 0, sphere_z])
+                sphere(r = R_sphere - wall, $fn = 96);
+            translate([0, 0, wall + filter_h])
+                cylinder(h = lid_h, r = filter_cyl_r, $fn = 96);
         }
-        // Hex pattern
+
+        // 7. Hex vent cutouts - through dome, outside grip, within filter area
+        for (q = [-N:N])
+            for (r = [-N:N]) {
+                cx = dx * (q + r * 0.5);
+                cy = dy * r;
+                dist = sqrt(cx * cx + cy * cy);
+                ring = max(abs(q), abs(r), abs(-q - r));
+
+                if (dist <= vent_max_dist && ring > 2)
+                    translate([cx, cy, 0])
+                        linear_extrude(height = dome_base_z + lid_h + 1)
+                            rotate(30)
+                                circle(r = hex_r, $fn = 6);
+            }
     }
-/*    difference() {
-        cylinder(h=wall,d=filter_d-(2*5));
-    difference() {
-        cylinder(h=lid_h, d=od, $fn=96);
-        translate([0,0,wall])
-            cylinder(h=lid_h-wall, d=od-wall*2, $fn=96);
-        // Filter holder
-        translate([0,0,wall])
-            cylinder(h=2, d=filter_d, $fn=96);
-        // Hex cutouts above filter
-        translate([0,0,wall+2])
-            hex_shell(
-                h=lid_h-wall-2,
-                d=od-wall*2,
-                wall=wall,
-                cell_d=8,
-                solid_top=0,
-                solid_bottom=0
-            );
-    }
-    // Handle
-    translate([0,0,lid_h])
-        hex_prism(h=handle_h, across=handle_across);*/
 }
 
 /*
@@ -235,7 +248,7 @@ module outer_lid() {
 module compost_bin() {
     inner_basket();
     translate([0,0,-1*wall-.1]) outer_basket();
-    //translate([0,0,200]) inner_lid();
+    translate([0,0,200]) inner_lid();
     //translate([0,0,225]) outer_lid();
 }
 
